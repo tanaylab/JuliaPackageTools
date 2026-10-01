@@ -6,6 +6,7 @@
 #
 #   - `pages` - the documentation pages, in navigation order. This must list every `src/*.md` file.
 #   - `interlinks` - optional, a table of package names to `objects.inv` URLs for `DocumenterInterLinks`.
+#   - `linkcheck_ignore` - optional, the URLs the link check should skip (e.g. sites which refuse automated requests).
 #
 # Every `src/assets/*.css` file is added to the HTML pages.
 
@@ -26,6 +27,7 @@ REPO = "https://github.com/tanaylab/$(NAME).jl"
 METADATA = TOML.parsefile(joinpath(PACKAGE_ROOT, "docs", "metadata.toml"))
 PAGES = METADATA["pages"]
 INTERLINKS = get(METADATA, "interlinks", Dict{String, Any}())
+LINKCHECK_IGNORE = get(METADATA, "linkcheck_ignore", String[])
 
 ASSETS_DIRECTORY = joinpath(PACKAGE_ROOT, "src", "assets")
 ASSETS = String[]
@@ -116,6 +118,7 @@ function make_documentation(; is_local::Bool)::Nothing
         sitename,
         draft = false,
         linkcheck = true,
+        linkcheck_ignore = LINKCHECK_IGNORE,
         format,
         pages = PAGES,
         plugins,
