@@ -119,6 +119,8 @@ function make_documentation(; is_local::Bool)::Nothing
         draft = false,
         linkcheck = true,
         linkcheck_ignore = LINKCHECK_IGNORE,
+        # A slow response from a working site should not fail the build; Documenter's default is 10 seconds.
+        linkcheck_timeout = 30,
         format,
         pages = PAGES,
         plugins,
