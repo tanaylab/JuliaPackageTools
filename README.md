@@ -6,7 +6,8 @@ Each package keeps a committed copy of these files in its `deps/` directory, so 
 just works. The root of this repository mirrors that `deps/` directory. Only this `README.md` is not copied.
 
 A package's `Makefile` includes `deps/common.mk`, then adds any rules of its own. The package name and the
-documentation version are read from the package's `Project.toml`.
+documentation version are read from the package's `Project.toml`. `make -j ci` runs the independent stages in
+parallel.
 
 Everything package-specific about the documentation is in the package's `docs/metadata.toml`. Package-only
 scripts stay in the package's own `deps/`, beside the shared ones.
