@@ -10,6 +10,7 @@ read_path = None
 read_lines = {}
 unused_lines = {}
 bad_paths = set()
+local_paths = set()  # the files of this package; only these are checked for unused NOJET directives
 
 def load_file(path):
     global read_lines
@@ -48,12 +49,9 @@ def is_disabled(path, line):
     unused_lines[path][line] = ""
     return "NOJET" in read_lines[path][line]
 
-for path in glob("src/*.jl"):
+for path in glob("src/*.jl") + glob("test/*.jl"):
     path = os.path.relpath(path)
-    load_file(path)
-
-for path in glob("test/*.jl"):
-    path = os.path.relpath(path)
+    local_paths.add(path)
     load_file(path)
 
 context_lines = []
@@ -117,9 +115,9 @@ for line in fileinput.input():
     context_changed = False
 
 unused = 0
-for path, lines in unused_lines.items():
-    for line_index, line_text in enumerate(lines):
-        if "NOJET" in line_text and ".jl/" in line_text:
+for path in sorted(local_paths):
+    for line_index, line_text in enumerate(unused_lines.get(path, [])):
+        if "NOJET" in line_text:
             if unused == 0:
                 print("")
             unused += 1
