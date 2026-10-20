@@ -48,8 +48,8 @@ function boxed_variables(modules::Set{Module}, paths::Set{String})::Vector{Tuple
     return sort!(collect(boxed))
 end
 
-# A boxed variable is created by `slot = Core.Box()` (or `Core.Box(argument)`) at the start of its scope. Each assignment
-# to it is a `Core.setfield!(box, :contents, value)`, where the `box` is the slot or an SSA value loading it.
+# A boxed variable is created by `slot = Core.Box()` (or `Core.Box(argument)`) at the start of its scope. Each
+# assignment to it is a `Core.setfield!(box, :contents, value)`, where the `box` is the slot or an SSA value loading it.
 function collect_boxed_variables!(boxed::Set{Tuple{String, Int, String}}, method::Method, path::String)::Nothing
     code = Base.uncompressed_ir(method)
     line_per_slot = Dict{Int, Int}()
