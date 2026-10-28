@@ -13,6 +13,9 @@ then
     do
         if ! echo "$FILES" | grep -q -x "$FILE"
         then
+            # The deletion is staged, since the Makefile lists the files by `git ls-files`, which would still
+            # list a file only deleted from the disk.
+            git rm -q -f --ignore-unmatch deps/$FILE
             rm -f deps/$FILE
         fi
     done
