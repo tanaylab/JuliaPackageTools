@@ -27,6 +27,29 @@ function collect_untyped_module_variables!(untyped::Vector{Tuple{Int, String}}, 
     return nothing
 end
 
+# The comprehensions of a file which don't give their element type (`[f(x) for x in xs]` rather than `T[f(x) for x in
+# xs]`), as `(line_number, text)`. An untyped comprehension takes the join of its elements' types, so elements of two
+# types give an abstract element type (e.g., `Integer` from `UInt16` and `Int`), and every access to it is untyped.
+function untyped_comprehensions(path::AbstractString)::Vector{Tuple{Int, String}}
+    untyped = Tuple{Int, String}[]
+    collect_untyped_comprehensions!(untyped, parseall(SyntaxNode, read(path, String); filename = path))
+    return untyped
+end
+
+function collect_untyped_comprehensions!(untyped::Vector{Tuple{Int, String}}, node::SyntaxNode)::Nothing
+    node_children = children(node)
+    if node_children === nothing
+        return nothing
+    end
+    if kind(node) == K"comprehension"
+        push!(untyped, (source_line(node), first(replace(sourcetext(node), r"\s+" => " "), 80)))
+    end
+    for child in node_children
+        collect_untyped_comprehensions!(untyped, child)
+    end
+    return nothing
+end
+
 # The local variables which closures capture in a `Core.Box`, in the methods of the `modules` defined in the `paths`, as
 # `(path, line_number, name)`. A variable is boxed when a closure captures it and it is assigned more than once. Each
 # access of a boxed variable is untyped. The line is that of its first assignment in the method's body. A variable which
@@ -185,6 +208,25 @@ function self_test()::Nothing
         error("floss self-test failed: module-level variables: $(found_untyped) expected: [(2, \"UNTYPED\")]")
     end
 
+    found_comprehensions = mktemp() do module_path, io
+        write(
+            io,
+            """
+            module M
+            indices(dict, names) = [get(dict, name, 0) for name in names]
+            typed_indices(dict, names) = UInt32[get(dict, name, 0) for name in names]
+            total(values) = sum(value for value in values)
+            pairs(values) = [(left, right) for left in values for right in values]
+            end
+            """,
+        )
+        close(io)
+        return [line_number for (line_number, _) in untyped_comprehensions(module_path)]
+    end
+    if found_comprehensions != [2, 5]
+        error("floss self-test failed: untyped comprehensions: $(found_comprehensions) expected: [2, 5]")
+    end
+
     return nothing
 end
 
@@ -219,6 +261,9 @@ function floss(root_module::Module)::Nothing
     for (path, problems) in problems_per_path
         for (line_number, name) in untyped_module_variables(path)
             push!(problems, (line_number, "Module-level variable is neither const nor typed: $(name)"))
+        end
+        for (line_number, text) in untyped_comprehensions(path)
+            push!(problems, (line_number, "Comprehension without an element type: $(text)"))
         end
     end
     for (path, line_number, name) in
