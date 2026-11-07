@@ -28,27 +28,69 @@ function collect_untyped_module_variables!(untyped::Vector{Tuple{Int, String}}, 
     return nothing
 end
 
-# The comprehensions of a file which don't give their element type (`[f(x) for x in xs]` rather than `T[f(x) for x in
-# xs]`), as `(line_number, text)`. An untyped comprehension takes the join of its elements' types, so elements of two
-# types give an abstract element type (e.g., `Integer` from `UInt16` and `Int`), and every access to it is untyped.
-function untyped_comprehensions(path::AbstractString)::Vector{Tuple{Int, String}}
-    untyped = Tuple{Int, String}[]
-    collect_untyped_comprehensions!(untyped, parseall(SyntaxNode, read(path, String); filename = path))
-    return untyped
+# The comprehensions of a file whose element type isn't static, as `(line_number, problem)`. An untyped comprehension
+# (`[f(x) for x in xs]`) takes the join of its elements' types, so elements of two types give an abstract element type
+# (e.g., `Integer` from `UInt16` and `Int`), and every access to it is untyped. An element type computed at run time
+# (`eltype(xs)[f(x) for x in xs]`) makes every element be stored through dynamic dispatch, which boxes it. A static
+# element type is a literal type or a type parameter: it has no calls, and its names are capitalized and aren't
+# assigned in the file (except as `const`). A run-time element type is made static by a function barrier, a function
+# whose parameter's type gives it as a type parameter.
+function unstatic_comprehensions(path::AbstractString)::Vector{Tuple{Int, String}}
+    unstatic = Tuple{Int, String}[]
+    root = parseall(SyntaxNode, read(path, String); filename = path)
+    assigned_names = Set{String}()
+    collect_assigned_names!(assigned_names, root)
+    collect_unstatic_comprehensions!(unstatic, assigned_names, root)
+    return unstatic
 end
 
-function collect_untyped_comprehensions!(untyped::Vector{Tuple{Int, String}}, node::SyntaxNode)::Nothing
+function collect_assigned_names!(assigned_names::Set{String}, node::SyntaxNode)::Nothing
+    node_children = children(node)
+    if node_children === nothing || kind(node) == K"const"
+        return nothing
+    end
+    if kind(node) == K"=" && kind(node_children[1]) == K"Identifier"
+        push!(assigned_names, sourcetext(node_children[1]))
+    end
+    for child in node_children
+        collect_assigned_names!(assigned_names, child)
+    end
+    return nothing
+end
+
+function collect_unstatic_comprehensions!(
+    unstatic::Vector{Tuple{Int, String}},
+    assigned_names::Set{String},
+    node::SyntaxNode,
+)::Nothing
     node_children = children(node)
     if node_children === nothing
         return nothing
     end
+    text = first(replace(sourcetext(node), r"\s+" => " "), 80)
     if kind(node) == K"comprehension"
-        push!(untyped, (source_line(node), first(replace(sourcetext(node), r"\s+" => " "), 80)))
+        push!(unstatic, (source_line(node), "Comprehension without an element type: $(text)"))
+    elseif kind(node) == K"typed_comprehension" && !is_static_type(node_children[1], assigned_names)
+        push!(unstatic, (source_line(node), "Comprehension element type is computed at run time: $(text)"))
     end
     for child in node_children
-        collect_untyped_comprehensions!(untyped, child)
+        collect_unstatic_comprehensions!(unstatic, assigned_names, child)
     end
     return nothing
+end
+
+function is_static_type(node::SyntaxNode, assigned_names::Set{String})::Bool
+    node_kind = kind(node)
+    if node_kind == K"Identifier"
+        name = sourcetext(node)
+        return isuppercase(first(name)) && !(name in assigned_names)
+    elseif node_kind == K"Integer"
+        return true
+    elseif node_kind in (K"curly", K".", K"<:", K">:")
+        return all(child -> is_static_type(child, assigned_names), children(node))
+    else
+        return false
+    end
 end
 
 # The local variables which closures capture in a `Core.Box`, in the methods of the `modules` defined in the `paths`, as
@@ -536,14 +578,24 @@ function self_test()::Nothing
             typed_indices(dict, names) = UInt32[get(dict, name, 0) for name in names]
             total(values) = sum(value for value in values)
             pairs(values) = [(left, right) for left in values for right in values]
+            copied(values) = eltype(values)[value for value in values]
+            nested(values) = Vector{eltype(values)}[[value] for value in values]
+            parametric(values::Vector{T}) where {T} = T[value for value in values]
+            named(values) = (value_type = eltype(values); value_type[value for value in values])
+            function assigned(values)
+                Element = eltype(values)
+                return Element[value for value in values]
+            end
+            bounded(sets) = AbstractSet{<:AbstractString}[set for set in sets]
+            dotted(values) = Base.RefValue{Int}[Ref(value) for value in values]
             end
             """,
         )
         close(io)
-        return [line_number for (line_number, _) in untyped_comprehensions(module_path)]
+        return Int[line_number for (line_number, _) in unstatic_comprehensions(module_path)]
     end
-    if found_comprehensions != [2, 5]
-        error("floss self-test failed: untyped comprehensions: $(found_comprehensions) expected: [2, 5]")
+    if found_comprehensions != [2, 5, 6, 7, 9, 12]
+        error("floss self-test failed: unstatic comprehensions: $(found_comprehensions) expected: [2, 5, 6, 7, 9, 12]")
     end
 
     return nothing
@@ -581,8 +633,8 @@ function floss(root_module::Module)::Nothing
         for (line_number, name) in untyped_module_variables(path)
             push!(problems, (line_number, "Module-level variable is neither const nor typed: $(name)"))
         end
-        for (line_number, text) in untyped_comprehensions(path)
-            push!(problems, (line_number, "Comprehension without an element type: $(text)"))
+        for (line_number, problem) in unstatic_comprehensions(path)
+            push!(problems, (line_number, problem))
         end
     end
     modules = package_modules(root_module)
