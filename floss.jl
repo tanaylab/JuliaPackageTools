@@ -1,3 +1,4 @@
+using Random
 using TOML
 
 using Base.JuliaSyntax: @K_str, children, kind, parseall, source_line, sourcetext, SyntaxNode
@@ -56,6 +57,15 @@ end
 # is only assigned in closures is reported at the start of its scope.
 function boxed_variables(modules::Set{Module}, paths::Set{String})::Vector{Tuple{String, Int, String}}
     boxed = Set{Tuple{String, Int, String}}()
+    foreach_package_method(modules, paths) do method, path
+        collect_boxed_variables!(boxed, method, path)
+        return nothing
+    end
+    return sort!(collect(boxed))
+end
+
+# Call `visit(method, path)` for each method of the `modules` which has a body and is defined in the `paths`.
+function foreach_package_method(visit::Function, modules::Set{Module}, paths::Set{String})::Nothing
     path_per_file = Dict{Symbol, String}()
     Base.visit(Core.methodtable) do method
         if method.module in modules && method.source !== nothing
@@ -63,12 +73,12 @@ function boxed_variables(modules::Set{Module}, paths::Set{String})::Vector{Tuple
                 return isfile(String(method.file)) ? realpath(String(method.file)) : ""
             end
             if path in paths
-                collect_boxed_variables!(boxed, method, path)
+                visit(method, path)
             end
         end
         return nothing
     end
-    return sort!(collect(boxed))
+    return nothing
 end
 
 # A boxed variable is created by `slot = Core.Box()` (or `Core.Box(argument)`) at the start of its scope. Each
@@ -114,9 +124,248 @@ function statement_line(code::Core.CodeInfo, method::Method, position::Integer, 
     return Int(default_line)
 end
 
+# The uses of the global random generator in the methods of the `modules` defined in the `paths`, as `(path,
+# line_number, problem)`. The global generator's state depends on everything that ran before it, so a result which
+# depends on it isn't reproducible. Reported are:
+#
+#   - A call which doesn't pass a generator to a function which accepts one. A function accepts a generator if some
+#     method of it takes an `rng` keyword, or a first positional argument of type `AbstractRNG`. This includes
+#     broadcasts (`rand.(...)`) and splatted calls (`rand(arguments...)`, checked when the first argument is given
+#     explicitly).
+#   - Passing such a function as a value (`map(rand, ...)`), since its calls can't be checked.
+#   - Calling `default_rng()`.
+#
+# A generator is a variable named `rng` or `..._rng`. Not seen: a function which uses the global generator internally
+# without accepting one, a generator under another name or in another position, a callee held in a variable, the files
+# under subdirectories of `src`, and `@generated` functions.
+function global_random_generator_uses(modules::Set{Module}, paths::Set{String})::Vector{Tuple{String, Int, String}}
+    uses = Set{Tuple{String, Int, String}}()
+    accepts_per_callee = IdDict{Any, Tuple{Bool, Bool}}()
+    foreach_package_method(modules, paths) do method, path
+        # The methods which apply the keyword arguments' defaults are generated, and call `default_rng()` for them.
+        signature = Base.unwrap_unionall(method.sig)
+        is_keyword_call_method = signature isa DataType && signature.parameters[1] === typeof(Core.kwcall)
+        if !is_keyword_call_method && isempty(Base.kwarg_decl(method))
+            collect_global_random_generator_uses!(uses, accepts_per_callee, method, path)
+        end
+        return nothing
+    end
+    return sort!(collect(uses))
+end
+
+# Keywords forwarded by `kwargs...` are merged into a named tuple whose names aren't known, so such a call isn't
+# checked. Nor is the plain call of the same callee which the lowering adds for when the forwarded keywords are empty.
+# A keyword function's generated methods pass the defaults to its body (named `#name#...`), so a method which calls
+# such a body isn't checked either.
+function collect_global_random_generator_uses!(
+    uses::Set{Tuple{String, Int, String}},
+    accepts_per_callee::IdDict{Any, Tuple{Bool, Bool}},
+    method::Method,
+    path::String,
+)::Nothing
+    code = Base.uncompressed_ir(method)
+    forwarded_callees = Set{Any}()
+    for statement in code.code
+        expression = unassigned_expression(statement)
+        if !(expression isa Expr && expression.head == :call)
+            continue
+        end
+        callee = resolved_callee(code, expression.args[1])
+        if callee isa Function && startswith(String(nameof(callee)), "#")
+            return nothing
+        end
+        if is_call_of(expression, :kwcall) && keyword_names_and_values(code, expression.args[2]) === nothing
+            push!(forwarded_callees, resolved_callee(code, expression.args[3]))
+        end
+    end
+
+    for (position, statement) in enumerate(code.code)
+        statement = unassigned_expression(statement)
+        if !(statement isa Expr && statement.head == :call)
+            continue
+        end
+        callee_position, keywords, first_argument = call_parts(code, statement)
+        callee = resolved_callee(code, statement.args[callee_position])
+        line_number = statement_line(code, method, position, method.line)
+
+        if callee === Random.default_rng
+            push!(uses, (path, line_number, "Global random generator is used: default_rng"))
+        elseif is_checked_callee(callee) && !(callee_position == 1 && callee in forwarded_callees)
+            does_accept_keyword, does_accept_positional = cached_accepts_random_generator(accepts_per_callee, callee)
+            if (does_accept_keyword || does_accept_positional) &&
+               !passes_random_generator(code, keywords, first_argument, does_accept_positional)
+                push!(uses, (path, line_number, "Call doesn't pass a random generator: $(nameof(callee))"))
+            end
+        end
+
+        for argument in statement.args[(callee_position + 1):end]
+            passed = resolved_callee(code, argument)
+            if is_checked_callee(passed) && any(cached_accepts_random_generator(accepts_per_callee, passed))
+                problem = "Function which accepts a random generator is passed as a value: $(nameof(passed))"
+                push!(uses, (path, line_number, problem))
+            end
+        end
+    end
+    return nothing
+end
+
+# The parts of a call: the position of its callee in the call's arguments, its keywords' named tuple (`nothing` if it
+# has none), and its first positional argument (`nothing` if it has none, `missing` if it isn't known). A keyword call
+# is `Core.kwcall(NamedTuple{names}(Core.tuple(values...)), callee, arguments...)`. A splatted call is
+# `Core._apply_iterate(iterate, callee, arguments...)`, whose arguments are collections. A broadcast is
+# `Base.broadcasted(callee, arguments...)`.
+function call_parts(code::Core.CodeInfo, statement::Expr)::Tuple{Int, Any, Any}
+    if is_call_of(statement, :kwcall)
+        return (3, statement.args[2], get(statement.args, 4, nothing))
+    elseif is_call_of(statement, :_apply_iterate)
+        first_collection = get(statement.args, 4, nothing)
+        first_collection = first_collection isa Core.SSAValue ? code.code[first_collection.id] : first_collection
+        if first_collection isa Tuple && !isempty(first_collection)
+            return (3, nothing, first_collection[1])
+        elseif is_call_of(first_collection, :tuple) && length(first_collection.args) >= 2
+            return (3, nothing, first_collection.args[2])
+        else
+            return (3, nothing, missing)
+        end
+    elseif resolved_callee(code, statement.args[1]) === Base.broadcasted
+        return (2, nothing, get(statement.args, 3, nothing))
+    else
+        return (1, nothing, get(statement.args, 2, nothing))
+    end
+end
+
+# Whether a callee is a function or a data type (a constructor), and isn't the body of a keyword function.
+function is_checked_callee(callee::Any)::Bool
+    return (callee isa Function || (callee isa Type && Base.unwrap_unionall(callee) isa DataType)) &&
+           !startswith(String(nameof(callee)), "#")
+end
+
+# Whether a call passes a random generator, as its `rng` keyword or (if the callee accepts it) its first positional
+# argument. A call whose keywords' names or first argument aren't known counts as passing one.
+function passes_random_generator(
+    code::Core.CodeInfo,
+    keywords::Any,
+    first_argument::Any,
+    does_accept_positional::Bool,
+)::Bool
+    if keywords !== nothing
+        names_and_values = keyword_names_and_values(code, keywords)
+        if names_and_values === nothing
+            return true
+        end
+        names, values = names_and_values
+        rng_position = findfirst(==(:rng), names)
+        if rng_position !== nothing
+            return is_random_generator(code, values[rng_position])
+        end
+    end
+    if !does_accept_positional
+        return false
+    end
+    return first_argument === missing || (first_argument !== nothing && is_random_generator(code, first_argument))
+end
+
+# A statement's expression, without the assignment of its value to a variable if it has one.
+function unassigned_expression(statement::Any)::Any
+    return statement isa Expr && statement.head == :(=) ? statement.args[2] : statement
+end
+
+function cached_accepts_random_generator(
+    accepts_per_callee::IdDict{Any, Tuple{Bool, Bool}},
+    callee::Union{Function, Type},
+)::Tuple{Bool, Bool}
+    return get!(accepts_per_callee, callee) do
+        return accepts_random_generator(callee)
+    end
+end
+
+# Whether some method of the `callee` takes an `rng` keyword, and whether some method takes a first positional argument
+# of type `AbstractRNG`.
+function accepts_random_generator(callee::Union{Function, Type})::Tuple{Bool, Bool}
+    does_accept_keyword = false
+    does_accept_positional = false
+    for callee_method in methods(callee)
+        does_accept_keyword |= :rng in Base.kwarg_decl(callee_method)
+        signature = Base.unwrap_unionall(callee_method.sig)
+        if signature isa DataType && length(signature.parameters) >= 2
+            first_parameter = signature.parameters[2]
+            if first_parameter isa TypeVar
+                first_parameter = first_parameter.ub
+            end
+            does_accept_positional |= first_parameter === Random.AbstractRNG
+        end
+    end
+    return (does_accept_keyword, does_accept_positional)
+end
+
+# The function a call's callee refers to: a global (`f`) or a module's global (`M.f`). Anything else is `nothing`.
+function resolved_callee(code::Core.CodeInfo, value::Any)::Any
+    if value isa Core.SSAValue
+        value = code.code[value.id]
+    end
+    if value isa GlobalRef
+        return isdefined(value.mod, value.name) ? getglobal(value.mod, value.name) : nothing
+    end
+    if value isa Expr && value.head == :call && value.args[1] == GlobalRef(Base, :getproperty)
+        parent = resolved_callee(code, value.args[2])
+        name = value.args[3]
+        if parent isa Module && name isa QuoteNode && isdefined(parent, name.value)
+            return getglobal(parent, name.value)
+        end
+    end
+    return nothing
+end
+
+# The names and values of a keyword call's named tuple, or `nothing` if the names aren't a literal tuple.
+function keyword_names_and_values(code::Core.CodeInfo, value::Any)::Union{Tuple{Tuple, Vector{Any}}, Nothing}
+    construction = value isa Core.SSAValue ? code.code[value.id] : value
+    if !(construction isa Expr && construction.head == :call && length(construction.args) == 2)
+        return nothing
+    end
+    named_tuple_type = construction.args[1]
+    named_tuple_type = named_tuple_type isa Core.SSAValue ? code.code[named_tuple_type.id] : named_tuple_type
+    if !(is_call_of(named_tuple_type, :apply_type) && named_tuple_type.args[2] == GlobalRef(Core, :NamedTuple))
+        return nothing
+    end
+    names = named_tuple_type.args[3]
+    names = names isa Core.SSAValue ? code.code[names.id] : names
+    names = names isa QuoteNode ? names.value : names
+    values = construction.args[2]
+    values = values isa Core.SSAValue ? code.code[values.id] : values
+    if !(names isa Tuple && is_call_of(values, :tuple))
+        return nothing
+    end
+    return (names, values.args[2:end])
+end
+
+# Whether a value is a variable named `rng` or `..._rng`: an argument or a local, or a captured variable of a closure.
+function is_random_generator(code::Core.CodeInfo, value::Any)::Bool
+    if value isa Core.SSAValue
+        value = code.code[value.id]
+    end
+    if value isa Expr && value.head == :(=)
+        value = value.args[1]
+    end
+    if value isa Core.SlotNumber
+        return is_random_generator_name(code.slotnames[value.id])
+    end
+    if is_call_of(value, :getfield)
+        field = value.args[3]
+        field = field isa QuoteNode ? field.value : field
+        return field isa Symbol && is_random_generator_name(field)
+    end
+    return false
+end
+
+function is_random_generator_name(name::Symbol)::Bool
+    return name == :rng || endswith(String(name), "_rng")
+end
+
 # Known cases for the self-test. Each boxed variable is marked on the line of its first assignment, which is never the
 # first statement of its scope (where the box is created), except for a variable which is only assigned in a closure.
 module FlossFixtures
+
+using Random
 
 struct Shown end
 
@@ -178,6 +427,61 @@ function not_boxed(values::Vector{Int})::Vector{Int}
     return map(index -> values[order[index]], 1:length(order))
 end
 
+function random_scale(value::Int; rng::AbstractRNG = Random.default_rng())::Float64
+    return rand(rng) * value
+end
+
+function passes_rng(values::Vector{Int}; rng::AbstractRNG = Random.default_rng())::Vector{Float64}
+    shuffled = shuffle(rng, values)
+    return map(shuffled) do value
+        return random_scale(value; rng)
+    end
+end
+
+function drops_keyword_rng(value::Int; rng::AbstractRNG = Random.default_rng())::Float64
+    return random_scale(value) + rand(rng)  # RANDOM random_scale
+end
+
+function drops_positional_rng(values::Vector{Int})::Vector{Int}
+    return shuffle(values)  # RANDOM shuffle
+end
+
+function drops_rng_in_closure(values::Vector{Int}; rng::AbstractRNG = Random.default_rng())::Vector{Float64}
+    return map(values) do value
+        return rand() * random_scale(value; rng)  # RANDOM rand
+    end
+end
+
+function passes_local_rng(value::Int)::Float64
+    local_rng = Xoshiro(value)
+    return random_scale(value; rng = local_rng)
+end
+
+function forwards_keywords(value::Int; keywords...)::Float64
+    return random_scale(value; keywords...)
+end
+
+function drops_rng_in_splat(counts::Vector{Int})::Array{Float64}
+    return rand(Float64, counts...)  # RANDOM rand
+end
+
+function passes_rng_in_splat(counts::Vector{Int}; rng::AbstractRNG = Random.default_rng())::Array{Float64}
+    return rand(rng, Float64, counts...)
+end
+
+function drops_rng_in_broadcast(values::Vector{Int})::Vector{Int}
+    return rand.(values)  # RANDOM rand
+end
+
+function passes_random_function(values::Vector{Vector{Int}})::Vector{Vector{Int}}
+    return map(shuffle, values)  # RANDOM shuffle
+end
+
+function uses_global_rng(value::Int)::Float64
+    global_rng = Random.default_rng()  # RANDOM default_rng
+    return random_scale(value; rng = global_rng)
+end
+
 end  # module
 
 # Verify the rules find exactly the known cases. The boxed variables are found through Julia internals, which a new
@@ -197,6 +501,21 @@ function self_test()::Nothing
     ]
     if found_boxed != expected_boxed || length(expected_boxed) != 5
         error("floss self-test failed: boxed variables: $(found_boxed) expected: $(expected_boxed)")
+    end
+
+    expected_random = Tuple{Int, String}[]
+    for (line_number, line_text) in enumerate(readlines(path))
+        random_match = match(r"# RANDOM (\w+)$", line_text)
+        if random_match !== nothing
+            push!(expected_random, (line_number, random_match.captures[1]))
+        end
+    end
+    found_random = Tuple{Int, String}[
+        (line_number, String(last(split(problem)))) for
+        (_, line_number, problem) in global_random_generator_uses(Set{Module}([FlossFixtures]), Set{String}([path]))
+    ]
+    if found_random != expected_random || length(expected_random) != 7
+        error("floss self-test failed: global random generator uses: $(found_random) expected: $(expected_random)")
     end
 
     found_untyped = mktemp() do module_path, io
@@ -266,9 +585,13 @@ function floss(root_module::Module)::Nothing
             push!(problems, (line_number, "Comprehension without an element type: $(text)"))
         end
     end
-    for (path, line_number, name) in
-        boxed_variables(package_modules(root_module), Set{String}(keys(relative_path_per_path)))
+    modules = package_modules(root_module)
+    paths = Set{String}(keys(relative_path_per_path))
+    for (path, line_number, name) in boxed_variables(modules, paths)
         push!(problems_per_path[path], (line_number, "Captured variable is boxed: $(name)"))
+    end
+    for (path, line_number, problem) in global_random_generator_uses(modules, paths)
+        push!(problems_per_path[path], (line_number, problem))
     end
 
     errors = 0
