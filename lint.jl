@@ -1,4 +1,5 @@
 using JuliaWorkspaces
+using TOML
 
 source_directory = abspath("src")
 
@@ -18,6 +19,34 @@ end
 for file_name in readdir(source_directory)
     if endswith(file_name, ".jl")
         add_file_from_disc!(workspace, joinpath(source_directory, file_name))
+    end
+end
+
+# The lab packages which the package uses are developed from their paths, so they have no symbol caches. Their sources
+# are given to the workspace, which indexes them as it does the package's own. Only the package's own files are
+# reported.
+manifest_entry_per_name = Dict(name => only(entries) for (name, entries) in TOML.parsefile(manifest_path)["deps"])
+pending_names = collect(keys(get(TOML.parsefile("Project.toml"), "deps", Dict{String, Any}())))
+seen_names = Set{String}()
+while !isempty(pending_names)
+    name = pop!(pending_names)
+    if name in seen_names || !haskey(manifest_entry_per_name, name)
+        continue
+    end
+    push!(seen_names, name)
+    entry = manifest_entry_per_name[name]
+    dependencies = get(entry, "deps", String[])
+    append!(pending_names, dependencies isa AbstractDict ? collect(keys(dependencies)) : dependencies)
+    if haskey(entry, "path")
+        dependency_directory = abspath(dirname(manifest_path), entry["path"])
+        add_file_from_disc!(workspace, joinpath(dependency_directory, "Project.toml"))
+        for (directory, _, file_names) in walkdir(joinpath(dependency_directory, "src"))
+            for file_name in file_names
+                if endswith(file_name, ".jl")
+                    add_file_from_disc!(workspace, joinpath(directory, file_name))
+                end
+            end
+        end
     end
 end
 
