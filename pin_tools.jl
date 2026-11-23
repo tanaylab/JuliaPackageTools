@@ -1,5 +1,5 @@
-# Pin each tool to its latest version that resolves together with all the packages in the given directory (each
-# `<name>.jl` with a `Project.toml`), their tests and the other tools. The pins are written into the `[compat]` of the
+# Pin each tool to its latest version that resolves together with all the packages in the given directory which use
+# these tools (see `tools_users.sh`), their tests and the other tools. The pins are written into the `[compat]` of the
 # tool environments here. A dependency of a tool environment which a package also depends on is left unpinned, so it
 # follows the packages. Run from the root of this repository: `julia pin_tools.jl ~/data/src`.
 
@@ -8,10 +8,7 @@ using TOML
 
 source_directory = ARGS[1]
 environment_names = ["aqua_env", "coverage_env", "document_env", "format_env", "jet_env", "lint_env"]
-package_paths = [
-    path for path in readdir(source_directory; join = true) if
-    endswith(path, ".jl") && isfile(joinpath(path, "Project.toml"))
-]
+package_paths = readlines(`$(joinpath(@__DIR__, "tools_users.sh")) $(source_directory)`)
 package_names = Set{String}(TOML.parsefile(joinpath(path, "Project.toml"))["name"] for path in package_paths)
 package_dependency_names = Set{String}(
     name for path in package_paths for name in keys(get(TOML.parsefile(joinpath(path, "Project.toml")), "deps", Dict()))

@@ -5,6 +5,16 @@ source_directory = abspath("src")
 # Only the package itself, so the tool environments in `deps/` aren't indexed.
 workspace = JuliaWorkspace(; dynamic = DynamicIndexingOnly)
 add_file_from_disc!(workspace, abspath("Project.toml"))
+
+# The package's environment is the manifest of its workspace, declared by the project beside it. Without these, the
+# workspace resolves a scratch project of its own in a child process, which may still run when this process exits.
+manifest_path = Base.project_file_manifest_path(abspath("Project.toml"))
+add_file_from_disc!(workspace, manifest_path)
+root_project_path = joinpath(dirname(manifest_path), "Project.toml")
+if root_project_path != abspath("Project.toml")
+    add_file_from_disc!(workspace, root_project_path)
+end
+
 for file_name in readdir(source_directory)
     if endswith(file_name, ".jl")
         add_file_from_disc!(workspace, joinpath(source_directory, file_name))
@@ -67,6 +77,23 @@ for file_name in sort!(readdir(source_directory))
     end
 end
 shutdown!(workspace)
+
+# Whether this process has a child process, other than the `ps` that answers (which lists itself).
+function has_child_processes()::Bool
+    children_count = count(readlines(`ps -A -o pid= -o ppid=`)) do line
+        return parse(Int, split(line)[2]) == getpid()
+    end
+    return children_count > 1
+end
+
+# `shutdown!` only signals the workspace's child processes. Exiting while this process still tears them down may crash
+# it, so wait until they are gone.
+if Sys.isunix()
+    while has_child_processes()
+        sleep(0.1)
+    end
+    sleep(0.1)
+end
 
 message = "StaticLint:"
 separator = ""

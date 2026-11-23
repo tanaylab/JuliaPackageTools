@@ -3,8 +3,8 @@
 The development and CI scripts shared by the Tanay lab Julia packages.
 
 Each package keeps a committed copy of these files in its `deps/` directory, so a plain `git clone` of the package
-just works. The root of this repository mirrors that `deps/` directory. Only this `README.md`, `pin_tools.jl` and
-`fetch_all.sh` are not copied.
+just works. The root of this repository mirrors that `deps/` directory. Only this `README.md`, `pin_tools.jl`,
+`fetch_all.sh` and `tools_users.sh` are not copied.
 
 A package's `Makefile` includes `deps/common.mk`, then adds any rules of its own. The package name and the
 documentation version are read from the package's `Project.toml`. `make -j ci` runs the independent stages in
@@ -48,10 +48,12 @@ file upward instead, so it shows the default rules.
 Each tool is pinned to an exact version in the `[compat]` of its environment, so every package, worktree and clone is
 checked by the same tools. A dependency of a tool environment which a package also depends on is not pinned, and
 follows the packages. `julia pin_tools.jl ~/data/src`, run here, moves the pins to the latest versions which resolve
-together with all the packages in that directory, their tests and the other tools. Commit the change here, then run
-`./fetch_all.sh ~/data/src`, also here. It runs `fetch_tools.sh` in each package, and then moves the shared manifest to
-the new pins. A plain resolve can't do that, since it keeps the versions the manifest already has. The packages' own
-dependencies are not pinned. `Pkg.update()` in the workspace moves them.
+together with all the packages there which use these tools, their tests and the other tools. `tools_users.sh` lists
+these packages: each directory, one or two levels down, with a `deps/tools_version`, in the main checkout of its
+repository. Commit the change here, then run `./fetch_all.sh ~/data/src`, also here. It runs `fetch_tools.sh` in each
+of these packages, and then moves each of their manifests to the new pins. A plain resolve can't do that, since it keeps
+the versions the manifest already has. The packages' own dependencies are not pinned. `Pkg.update()` in the workspace
+moves them.
 
 The packages are developed side by side in one directory, which is itself a workspace over all of them. They then share
 one `Manifest.toml`, so a package is compiled once for itself and for every package which uses it. A worktree of a

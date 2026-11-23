@@ -3,6 +3,10 @@ using Pkg
 using Test
 using TOML
 
+# The tool environment doesn't depend on the package. The package's own project comes first, so Aqua finds the package
+# in the current directory, and not another copy in the default environment.
+pushfirst!(LOAD_PATH, ".")
+
 PROJECT = TOML.parsefile("Project.toml")
 PACKAGE_NAME = Symbol(PROJECT["name"])
 @eval using $(PACKAGE_NAME)

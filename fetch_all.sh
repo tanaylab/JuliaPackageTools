@@ -1,31 +1,38 @@
 #!/bin/bash
 set -e -o pipefail
-# Fetch the committed tools of this repository into every package in the given directory (each `<name>.jl` with a
-# `Project.toml`), using `fetch_tools.sh`. Then move the manifest which the packages share to the pinned versions of the
-# tools. All the packages must be members of the workspace of the directory. Run from the root of this repository:
-# `./fetch_all.sh ~/data/src`.
+# Fetch the committed tools of this repository into every package in the given directory which uses them (see
+# `tools_users.sh`), using `fetch_tools.sh`. Then move the manifest of each package to the pinned versions of the tools.
+# Run from the root of this repository: `./fetch_all.sh ~/data/src`.
 TOOLS=`pwd`
-PACKAGES=""
-for PACKAGE in $1/*.jl
+PACKAGES=`./tools_users.sh $1`
+for PACKAGE in $PACKAGES
 do
-    if [ -f $PACKAGE/Project.toml ]
-    then
-        echo "Fetching into: $PACKAGE"
-        (cd $PACKAGE && $TOOLS/fetch_tools.sh $TOOLS)
-        PACKAGES="$PACKAGES $PACKAGE"
-    fi
+    echo "Fetching into: $PACKAGE"
+    (cd $PACKAGE && $TOOLS/fetch_tools.sh $TOOLS)
 done
 
-# The shared manifest is the same from every package, so the tool environments of one of them are enough. A targeted
-# update only moves the dependencies of the environment it runs in.
-set -- $PACKAGES
-for ENVIRONMENT in $1/deps/*_env
-do
-    echo "Updating the tools of: $ENVIRONMENT"
-    julia --project=$ENVIRONMENT -e '
+# Packages in one workspace share its manifest, so it is updated once, from the tool environments of one of them. A
+# targeted update only moves the dependencies of the environment it runs in.
+julia -e '
 using Pkg
 using TOML
-pinned_names = collect(keys(get(TOML.parsefile(joinpath(ARGS[1], "Project.toml")), "compat", Dict{String, Any}())))
-Pkg.update(pinned_names; preserve = Pkg.PRESERVE_NONE)
-' $ENVIRONMENT
-done
+updated_manifest_paths = Set{String}()
+for package_path in ARGS
+    manifest_path = Base.project_file_manifest_path(joinpath(package_path, "Project.toml"))
+    if manifest_path !== nothing
+        if manifest_path in updated_manifest_paths
+            continue
+        end
+        push!(updated_manifest_paths, manifest_path)
+    end
+    for environment_name in readdir(joinpath(package_path, "deps"))
+        environment_path = joinpath(package_path, "deps", environment_name)
+        if endswith(environment_name, "_env") && isdir(environment_path)
+            println("Updating the tools of: $(environment_path)")
+            Pkg.activate(environment_path)
+            compat = get(TOML.parsefile(joinpath(environment_path, "Project.toml")), "compat", Dict())
+            Pkg.update(collect(keys(compat)); preserve = Pkg.PRESERVE_NONE)
+        end
+    end
+end
+' $PACKAGES
