@@ -698,9 +698,8 @@ function floss(root_module::Module)::Nothing
 
     # These rules check the package's loaded methods, so they check only its own files.
     modules = package_modules(root_module)
-    source_paths = Set{String}(
-        path for (path, relative_path) in relative_path_per_path if startswith(relative_path, "src/")
-    )
+    source_paths =
+        Set{String}(path for (path, relative_path) in relative_path_per_path if startswith(relative_path, "src/"))
     for (path, line_number, name) in boxed_variables(modules, source_paths)
         push!(problems_per_path[path], (line_number, "Captured variable is boxed: $(name)"))
     end
