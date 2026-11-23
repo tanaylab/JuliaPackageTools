@@ -79,6 +79,37 @@ function collect_unstatic_comprehensions!(
     return nothing
 end
 
+# The comparisons of a file with the empty string (`value == ""`, `values .!= ""`, etc.), as `(line_number, problem)`.
+# Broadcasting `==` over a NamedArray of abstract strings fails in NamedArrays, and `===` is false for an empty string
+# which isn't a `String`. So emptiness is tested with `isempty` (or `isempty.` for an array).
+function empty_string_comparisons(path::AbstractString)::Vector{Tuple{Int, String}}
+    comparisons = Tuple{Int, String}[]
+    collect_empty_string_comparisons!(comparisons, parseall(SyntaxNode, read(path, String); filename = path))
+    return comparisons
+end
+
+function collect_empty_string_comparisons!(comparisons::Vector{Tuple{Int, String}}, node::SyntaxNode)::Nothing
+    node_children = children(node)
+    if node_children === nothing
+        return nothing
+    end
+    if kind(node) in (K"call", K"dotcall") &&
+       length(node_children) == 3 &&
+       sourcetext(node_children[2]) in ("==", "!=", "===", "!==") &&
+       (is_empty_string(node_children[1]) || is_empty_string(node_children[3]))
+        text = first(strip(replace(sourcetext(node), r"\s+" => " ")), 80)
+        push!(comparisons, (source_line(node), "Comparison with the empty string instead of isempty: $(text)"))
+    end
+    for child in node_children
+        collect_empty_string_comparisons!(comparisons, child)
+    end
+    return nothing
+end
+
+function is_empty_string(node::SyntaxNode)::Bool
+    return kind(node) == K"string" && sourcetext(node) == "\"\""
+end
+
 function is_static_type(node::SyntaxNode, assigned_names::Set{String})::Bool
     node_kind = kind(node)
     if node_kind == K"Identifier"
@@ -598,6 +629,26 @@ function self_test()::Nothing
         error("floss self-test failed: unstatic comprehensions: $(found_comprehensions) expected: [2, 5, 6, 7, 9, 12]")
     end
 
+    found_comparisons = mktemp() do module_path, io
+        write(
+            io,
+            """
+            module M
+            is_unnamed(name) = name == ""
+            named_mask(names) = names .!= ""
+            is_blank(text) = "" === text
+            is_set(value) = !isempty(value)
+            is_x(text) = text == "x"
+            end
+            """,
+        )
+        close(io)
+        return Int[line_number for (line_number, _) in empty_string_comparisons(module_path)]
+    end
+    if found_comparisons != [2, 3, 4]
+        error("floss self-test failed: empty string comparisons: $(found_comparisons) expected: [2, 3, 4]")
+    end
+
     return nothing
 end
 
@@ -622,27 +673,38 @@ end
 
 function floss(root_module::Module)::Nothing
     relative_path_per_path = Dict{String, String}()
-    for file_name in readdir("src")
-        if endswith(file_name, ".jl")
-            relative_path_per_path[realpath("src/$(file_name)")] = "src/$(file_name)"
+    problems_per_path = Dict{String, Vector{Tuple{Int, String}}}()
+    for directory in ("src", "test")
+        for file_name in readdir(directory)
+            if endswith(file_name, ".jl")
+                path = realpath("$(directory)/$(file_name)")
+                relative_path_per_path[path] = "$(directory)/$(file_name)"
+                problems = problems_per_path[path] = Tuple{Int, String}[]
+                for (line_number, name) in untyped_module_variables(path)
+                    push!(problems, (line_number, "Module-level variable is neither const nor typed: $(name)"))
+                end
+                for (line_number, problem) in empty_string_comparisons(path)
+                    push!(problems, (line_number, problem))
+                end
+                # The element types of comprehensions matter only for the speed of the package's own code.
+                if directory == "src"
+                    for (line_number, problem) in unstatic_comprehensions(path)
+                        push!(problems, (line_number, problem))
+                    end
+                end
+            end
         end
     end
 
-    problems_per_path = Dict(path => Tuple{Int, String}[] for path in keys(relative_path_per_path))
-    for (path, problems) in problems_per_path
-        for (line_number, name) in untyped_module_variables(path)
-            push!(problems, (line_number, "Module-level variable is neither const nor typed: $(name)"))
-        end
-        for (line_number, problem) in unstatic_comprehensions(path)
-            push!(problems, (line_number, problem))
-        end
-    end
+    # These rules check the package's loaded methods, so they check only its own files.
     modules = package_modules(root_module)
-    paths = Set{String}(keys(relative_path_per_path))
-    for (path, line_number, name) in boxed_variables(modules, paths)
+    source_paths = Set{String}(
+        path for (path, relative_path) in relative_path_per_path if startswith(relative_path, "src/")
+    )
+    for (path, line_number, name) in boxed_variables(modules, source_paths)
         push!(problems_per_path[path], (line_number, "Captured variable is boxed: $(name)"))
     end
-    for (path, line_number, problem) in global_random_generator_uses(modules, paths)
+    for (path, line_number, problem) in global_random_generator_uses(modules, source_paths)
         push!(problems_per_path[path], (line_number, problem))
     end
 
