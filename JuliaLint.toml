@@ -1,0 +1,5 @@
+preset = "strict"
+
+[rules]
+bare_using = "off"
+string_concat_style = "off"

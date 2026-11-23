@@ -16,7 +16,7 @@ detect_problems = EarlyFilteredLogger(global_logger()) do log_args
 end
 global_logger(detect_problems)
 
-Pkg.test(; coverage = true, test_args = Base.ARGS)
+Pkg.test(; coverage = true, julia_args = ["--compiled-modules=strict"], test_args = Base.ARGS)
 
 if CountWarnings.seen_problems > 1
     exit(1)

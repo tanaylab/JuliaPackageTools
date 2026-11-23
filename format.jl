@@ -11,6 +11,20 @@ end
 global_logger(detect_problems)
 
 using JuliaFormatter
+
+# JuliaFormatter escapes every `"` of the code in a triple-quoted docstring, though only a `"""` needs it there. This
+# escapes `\` and `$` as it does, and a `"` only within a `"""`.
+function JuliaFormatter.escape_docstring_code(text::AbstractString, context::JuliaFormatter.FormatDocstringContext)
+    if context === JuliaFormatter.MarkdownFile
+        return text
+    elseif context === JuliaFormatter.TripleQuotedDocstring
+        text_chunks = [replace(chunk, "\\" => "\\\\", "\$" => "\\\$") for chunk in split(text, "\"\"\"")]
+        return join(text_chunks, "\\\"\"\"")
+    else
+        return replace(text, "\\" => "\\\\", "\$" => "\\\$", "\"" => "\\\"")
+    end
+end
+
 format(
     ".";
     indent = 4,

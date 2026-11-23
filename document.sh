@@ -14,8 +14,7 @@ then
         dot -Tsvg $F > src/assets/`basename $F .dot`.svg
     done
 fi
-julia --project=deps/document_env -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'
-JULIA_DEBUG="" julia --project=deps/document_env --color=no deps/document.jl
+JULIA_DEBUG="" julia --compiled-modules=strict --project=deps/document_env --color=no deps/document.jl
 python3 deps/document.py docs/v$VERSION
 sed -i 's: on <span class="colophon-date" title="[^"]*">[^<]*</span>::;s:<:\n<:g' docs/v$VERSION/*html
 sed -i -E ':a ; $!N ; s/\n<sub>/<sub>/ ; s/\n<\/sub>/<\/sub>/ ; ta ; P ; D' docs/v$VERSION/*html

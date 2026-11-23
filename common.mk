@@ -2,6 +2,11 @@
 
 DOCS_VERSION := v$(shell sed -n 's/^version = "\(.*\)"$$/\1/p' Project.toml)
 
+# Julia keeps at most this many compiled cache files of each package and deletes the oldest. The default of 10 is less
+# than the copies a few source trees and their flags need, so a compilation would delete a file another process is
+# still using.
+export JULIA_MAX_NUM_PRECOMPILE_FILES := 100
+
 TODO = todo
 TODO_X = $(TODO)x
 
@@ -27,23 +32,33 @@ check_tools:
 fetch_tools:
 	deps/fetch_tools.sh $(TOOLS)
 
+# Use `make worktree TAG=<tag>` to create a worktree of the package beside it, and add `COMMIT=<commit>` to check out
+# another commit than `HEAD`.
+.PHONY: worktree
+worktree:
+	deps/worktree.sh $(TAG) $(COMMIT)
+
 .PHONY: format
 format: deps/.did.format
 deps/.did.format: *.md */*.jl deps/format.sh deps/format.jl deps/reflow.py
 	deps/format.sh
 	@touch deps/.did.format
 
-# The project is resolved once, before the stages which use it, so that none of them writes it while another reads it.
-deps/.did.prepare: *.toml
-	julia --project=. -e 'using Pkg; Pkg.resolve(); Pkg.instantiate(); Pkg.precompile()'
-	@touch deps/.did.prepare
+# The workspace is resolved and compiled once, before the stages which use it, so that none of them writes it while
+# another reads it, and none compiles what another is compiling. It runs every time: a change in another package of the
+# workspace makes the compiled files stale without changing any file of this one.
+.PHONY: precompile
+precompile:
+	deps/precompile.sh
+
+deps/.did.lint deps/.did.floss deps/.did.jet deps/.did.aqua tracefile.info docs/$(DOCS_VERSION)/index.html: \
+    | precompile
 
 # In a full build (`ci`, which is also the default goal), the stages are ordered so they can run in parallel (`make
 # -j`). The formatter rewrites the sources, so it runs first. The check that everything is staged runs after everything
 # which writes files, and the check of the tools runs last. A stage run by itself is not affected.
 ifeq ($(if $(MAKECMDGOALS),$(filter ci,$(MAKECMDGOALS)),ci),ci)
-deps/.did.lint deps/.did.floss deps/.did.jet deps/.did.aqua tracefile.info docs/$(DOCS_VERSION)/index.html: \
-    | deps/.did.format deps/.did.prepare
+precompile: | deps/.did.format
 deps/.did.$(TODO_X): | deps/.did.format
 unindexed_files: format check coverage docs $(TODO_X)
 check_tools: unindexed_files
@@ -55,7 +70,7 @@ check: lint floss jet aqua untested_lines
 .PHONY: lint
 lint: deps/.did.lint
 
-deps/.did.lint: *.toml src/*.jl test/*.toml test/*.jl deps/lint.sh deps/lint.jl
+deps/.did.lint: *.toml src/*.jl test/*.toml test/*.jl deps/lint.sh deps/lint.jl deps/JuliaLint.toml
 	deps/lint.sh
 	@touch deps/.did.lint
 

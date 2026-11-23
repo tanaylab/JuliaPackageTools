@@ -1,3 +1,7 @@
 [deps]
 Coverage = "a2441757-f6aa-5fb2-8edb-039e3f45d037"
 LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
+
+[compat]
+Coverage = "=1.9.0"
+LoggingExtras = "=1.2.0"

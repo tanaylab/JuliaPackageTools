@@ -10,7 +10,7 @@ set -e -o pipefail
     TEMPORARY=`mktemp -d`
     trap "rm -rf $TEMPORARY" EXIT
     git clone --quiet --depth 1 $SOURCE $TEMPORARY 2> >(grep -v 'depth is ignored in local clones' >&2)
-    FILES=`git -C $TEMPORARY ls-files | grep -v '^README.md$'`
+    FILES=`git -C $TEMPORARY ls-files | grep -v '^README.md$\|^pin_tools.jl$\|^fetch_all.sh$'`
     if [ -f deps/tools_version ]
     then
         for FILE in `tail -n +2 deps/tools_version | sed 's/^[^ ]*  //'`

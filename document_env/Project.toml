@@ -7,4 +7,7 @@ LoggingExtras = "e6f89c97-d47a-5376-807f-9c37f3926c36"
 PlotlyDocumenter = "9b90f1cd-2639-4507-8b17-2fbe371ceceb"
 
 [compat]
-JSON = "0.21"
+Documenter = "=1.20.0"
+DocumenterInterLinks = "=1.1.0"
+LoggingExtras = "=1.2.0"
+PlotlyDocumenter = "=0.3.1"

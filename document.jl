@@ -16,9 +16,6 @@ using LoggingExtras
 using TOML
 
 PACKAGE_ROOT = abspath(joinpath(@__DIR__, ".."))
-# The package in this directory comes first, so the documentation is of it and not of another copy in the default
-# environment.
-pushfirst!(LOAD_PATH, PACKAGE_ROOT)
 
 PROJECT_TOML = TOML.parsefile(joinpath(PACKAGE_ROOT, "Project.toml"))
 NAME = PROJECT_TOML["name"]
