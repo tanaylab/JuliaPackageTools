@@ -13,7 +13,15 @@ PACKAGE_NAME = Symbol(PROJECT["name"])
 PACKAGE = getfield(Main, PACKAGE_NAME)
 
 Aqua.test_ambiguities([PACKAGE])
-Aqua.test_all(PACKAGE; ambiguities = false, unbound_args = false, deps_compat = false, persistent_tasks = false)
+# Floss reports the unused dependencies, of the tests too, so Aqua's stale dependencies test is off.
+Aqua.test_all(
+    PACKAGE;
+    ambiguities = false,
+    unbound_args = false,
+    deps_compat = false,
+    persistent_tasks = false,
+    stale_deps = false,
+)
 
 # Whether a process that loads the package exits within `tmax` seconds of the loading. A task left running would keep
 # it alive, and block the precompilation of the packages that use this one. As `Aqua.test_persistent_tasks` does, this

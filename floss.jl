@@ -124,6 +124,64 @@ function is_static_type(node::SyntaxNode, assigned_names::Set{String})::Bool
     end
 end
 
+# The dependencies in the `[deps]` of a project file which no `using` or `import` in the files under a directory loads,
+# as `(line_number, problem)`. This includes the statements in quoted code, such as `@eval using Name`. The `exempt`
+# packages are never reported. Each problem gives the command which removes the dependency.
+function unused_dependencies(
+    project_path::AbstractString,
+    directory::AbstractString,
+    exempt::Set{String},
+)::Vector{Tuple{Int, String}}
+    loaded = Set{String}()
+    for (root, _, file_names) in walkdir(directory)
+        for file_name in file_names
+            if endswith(file_name, ".jl")
+                path = joinpath(root, file_name)
+                collect_loaded_packages!(loaded, parseall(SyntaxNode, read(path, String); filename = path))
+            end
+        end
+    end
+
+    unused = Tuple{Int, String}[]
+    is_in_deps = false
+    for (line_number, line_text) in enumerate(readlines(project_path))
+        section_match = match(r"^\s*\[(.*)\]\s*$", line_text)
+        if section_match !== nothing
+            is_in_deps = section_match.captures[1] == "deps"
+        elseif is_in_deps
+            name_match = match(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=", line_text)
+            if name_match !== nothing && !(name_match.captures[1] in loaded) && !(name_match.captures[1] in exempt)
+                name = name_match.captures[1]
+                push!(unused, (line_number, "Dependency is never loaded: $(name); remove it with Pkg.rm(\"$(name)\")"))
+            end
+        end
+    end
+    return unused
+end
+
+# A `using` or `import` names a package by the first identifier of its module path. A relative path (`using .Inner`)
+# and an interpolated one (`@eval using $(name)`) name no package. After a `:`, only the first path is a module.
+function collect_loaded_packages!(loaded::Set{String}, node::SyntaxNode)::Nothing
+    node_children = children(node)
+    if node_children === nothing
+        return nothing
+    end
+    if kind(node) in (K"using", K"import")
+        for child in node_children
+            module_path = kind(child) in (K":", K"as") ? children(child)[1] : child
+            path_children = children(module_path)
+            if kind(module_path) == K"importpath" && kind(path_children[1]) == K"Identifier"
+                push!(loaded, sourcetext(path_children[1]))
+            end
+        end
+    else
+        for child in node_children
+            collect_loaded_packages!(loaded, child)
+        end
+    end
+    return nothing
+end
+
 # The local variables which closures capture in a `Core.Box`, in the methods of the `modules` defined in the `paths`, as
 # `(path, line_number, name)`. A variable is boxed when a closure captures it and it is assigned more than once. Each
 # access of a boxed variable is untyped. The line is that of its first assignment in the method's body. A variable which
@@ -649,6 +707,50 @@ function self_test()::Nothing
         error("floss self-test failed: empty string comparisons: $(found_comparisons) expected: [2, 3, 4]")
     end
 
+    found_dependencies = mktempdir() do directory
+        mkpath(joinpath(directory, "src", "inner"))
+        write(
+            joinpath(directory, "src", "M.jl"),
+            """
+            module M
+            using Used
+            import Imported: name
+            @eval using Evaluated
+            using .Relative
+            include("inner/N.jl")
+            end
+            """,
+        )
+        write(joinpath(directory, "src", "inner", "N.jl"), "import Nested as Alias\n")
+        write(
+            joinpath(directory, "Project.toml"),
+            """
+            name = "M"
+
+            [deps]
+            Evaluated = "00000000-0000-0000-0000-000000000001"
+            Exempt = "00000000-0000-0000-0000-000000000002"
+            Imported = "00000000-0000-0000-0000-000000000003"
+            Nested = "00000000-0000-0000-0000-000000000004"
+            Unused = "00000000-0000-0000-0000-000000000005"
+            Used = "00000000-0000-0000-0000-000000000006"
+
+            [compat]
+            Unused = "1"
+            """,
+        )
+        return Int[
+            line_number for (line_number, _) in unused_dependencies(
+                joinpath(directory, "Project.toml"),
+                joinpath(directory, "src"),
+                Set{String}(["Exempt"]),
+            )
+        ]
+    end
+    if found_dependencies != [8]
+        error("floss self-test failed: unused dependencies: $(found_dependencies) expected: [8]")
+    end
+
     return nothing
 end
 
@@ -694,6 +796,14 @@ function floss(root_module::Module)::Nothing
                 end
             end
         end
+    end
+
+    # The tests needn't load the package itself, since `Pkg.test` does.
+    for (project_path, directory, exempt) in
+        (("Project.toml", "src", Set{String}()), ("test/Project.toml", "test", Set{String}([PACKAGE_NAME])))
+        path = realpath(project_path)
+        relative_path_per_path[path] = project_path
+        problems_per_path[path] = unused_dependencies(project_path, directory, exempt)
     end
 
     # These rules check the package's loaded methods, so they check only its own files.
