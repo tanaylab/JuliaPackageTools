@@ -98,8 +98,8 @@ deps/.did.aqua: *.toml src/*.jl test/*.toml test/*.jl deps/aqua.sh deps/aqua.jl
 .PHONY: test
 test: deps/.did.test
 
-# The target is a marker, not `tracefile.info`. A run of only some of the tests (`deps/test.sh <prefix>`) also writes
-# `tracefile.info`, but it deletes the marker, so the next build runs all the tests again.
+# The target is a marker. A run of only some of the tests (`deps/test.sh <prefix>`) deletes it, so the next build runs
+# all the tests again.
 deps/.did.test: *.toml src/*.jl test/*.toml test/*.jl deps/test.sh deps/test.jl deps/clean.sh
 	deps/test.sh
 	@touch deps/.did.test
