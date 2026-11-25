@@ -51,7 +51,7 @@ deps/.did.format: *.md */*.jl deps/format.sh deps/format.jl deps/reflow.py
 precompile:
 	deps/precompile.sh
 
-deps/.did.lint deps/.did.floss deps/.did.jet deps/.did.aqua tracefile.info docs/$(DOCS_VERSION)/index.html: \
+deps/.did.lint deps/.did.floss deps/.did.jet deps/.did.aqua deps/.did.test docs/$(DOCS_VERSION)/index.html: \
     | precompile
 
 # In a full build (`ci`, which is also the default goal), the stages are ordered so they can run in parallel (`make
@@ -96,15 +96,18 @@ deps/.did.aqua: *.toml src/*.jl test/*.toml test/*.jl deps/aqua.sh deps/aqua.jl
 	@touch deps/.did.aqua
 
 .PHONY: test
-test: tracefile.info
+test: deps/.did.test
 
-tracefile.info: *.toml src/*.jl test/*.toml test/*.jl deps/test.sh deps/test.jl deps/clean.sh
+# The target is a marker, not `tracefile.info`. A run of only some of the tests (`deps/test.sh <prefix>`) also writes
+# `tracefile.info`, but it deletes the marker, so the next build runs all the tests again.
+deps/.did.test: *.toml src/*.jl test/*.toml test/*.jl deps/test.sh deps/test.jl deps/clean.sh
 	deps/test.sh
+	@touch deps/.did.test
 
 .PHONY: line_coverage
 line_coverage: deps/.did.coverage
 
-deps/.did.coverage: tracefile.info deps/line_coverage.sh deps/line_coverage.jl
+deps/.did.coverage: deps/.did.test deps/line_coverage.sh deps/line_coverage.jl
 	deps/line_coverage.sh
 	@touch deps/.did.coverage
 
